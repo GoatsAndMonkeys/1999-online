@@ -1,0 +1,159 @@
+#include "skin.h"
+
+#include "style.h"
+
+#include <cstring>
+
+namespace mm::ui {
+namespace {
+
+constexpr TitleFill S = TitleFill::Solid, H = TitleFill::GradH, V = TitleFill::GradV,
+                    P = TitleFill::Stripes;
+
+// Field order follows struct Skin. Keep one skin per block.
+const Skin kSkins[] = {
+    {"w95", "Windows 95",
+     0xc0c0c0, 0xc0c0c0, 0x000000, 0x808080, 0xffffff, 0x000000, 0x000080, 0xffffff,
+     S, 0x000080, 0x000080, 0xffffff, false, false, false, false, 0xc0c0c0, 0x000000, 0,
+     0xc0c0c0, 0xc0c0c0, 0x000000, true,
+     0xc0c0c0, 0xc0c0c0, 0x000000,
+     true, 0xffffff, 0x404040, 0, 0,
+     0xffffe1, 0x000000, 0x000000,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"me", "Windows ME",
+     0xd4d0c8, 0xd4d0c8, 0x000000, 0x808080, 0xffffff, 0x000000, 0x0a246a, 0xffffff,
+     H, 0x0a246a, 0xa6caf0, 0xffffff, false, false, false, false, 0xd4d0c8, 0x000000, 0,
+     0xd4d0c8, 0xd4d0c8, 0x000000, true,
+     0xd4d0c8, 0xd4d0c8, 0x000000,
+     true, 0xffffff, 0x404040, 0, 0,
+     0xffffe1, 0x000000, 0x000000,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"xp", "Windows XP",
+     0x3a6ea5, 0xece9d8, 0x000000, 0x808080, 0xffffff, 0x000000, 0x316ac5, 0xffffff,
+     V, 0x3a93ff, 0x0046c8, 0xffffff, false, false, false, false, 0xe04a2f, 0xffffff, 3,
+     0x3a80f0, 0x245edb, 0xffffff, false,
+     0x3a80f0, 0x1f4fc0, 0xffffff,
+     false, 0xffffff, 0x003c74, 3, 6,
+     0xffffe1, 0x000000, 0x7f9db9,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"vista", "Windows Vista",
+     0x1f5a7a, 0xf0f0f0, 0x000000, 0x6d6d6d, 0xffffff, 0x000000, 0xcde8ff, 0x000000,
+     V, 0x8fa8c4, 0x2f4a6c, 0xffffff, false, false, false, false, 0xc9402e, 0xffffff, 3,
+     0x4a5a6c, 0x0c1016, 0xffffff, false,
+     0x4a5a6c, 0x0c1016, 0xffffff,
+     false, 0xffffff, 0x707070, 3, 6,
+     0xffffff, 0x000000, 0x767676,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"sys7", "Mac System 7",
+     0xaaaaaa, 0xffffff, 0x000000, 0x666666, 0xffffff, 0x000000, 0x000000, 0xffffff,
+     P, 0xffffff, 0x000000, 0x000000, true, false, false, true, 0xffffff, 0xffffff, 0,
+     0xffffff, 0xffffff, 0x000000, false,
+     0xffffff, 0xffffff, 0x000000,
+     false, 0xffffff, 0x000000, 6, 0,
+     0xffffff, 0x000000, 0x000000,
+     0x000000, 0x000000, 0xdddddd, false},
+
+    {"mac9", "Mac OS 9",
+     0x6a8fc0, 0xdddddd, 0x000000, 0x777777, 0xffffff, 0x000000, 0x333399, 0xffffff,
+     P, 0xdddddd, 0x999999, 0x000000, true, false, false, true, 0xdddddd, 0xdddddd, 0,
+     0xe8e8e8, 0xe8e8e8, 0x000000, false,
+     0xbbbbbb, 0xbbbbbb, 0x000000,
+     false, 0xffffff, 0x000000, 5, 0,
+     0xffffff, 0x000000, 0x555555,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"beos", "BeOS",
+     0x336698, 0xd8d8d8, 0x000000, 0x707070, 0xffffff, 0x000000, 0x9a9a9a, 0x000000,
+     S, 0xffcb00, 0xffcb00, 0x000000, false, false, true, true, 0xffcb00, 0xffcb00, 0,
+     0xd8d8d8, 0xd8d8d8, 0x000000, false,
+     0xd8d8d8, 0xd8d8d8, 0x000000,
+     false, 0xffffff, 0x606060, 3, 0,
+     0xffffd0, 0x000000, 0x606060,
+     0xc00000, 0x0000c0, 0xffcb00, false},
+
+    {"os2", "OS/2 Warp",
+     0x5f8f8f, 0xcccccc, 0x000000, 0x707070, 0xffffff, 0x000000, 0x808080, 0xffffff,
+     S, 0x1f7a7a, 0x1f7a7a, 0xffffff, true, false, false, false, 0xcccccc, 0x000000, 0,
+     0xcccccc, 0xcccccc, 0x000000, true,
+     0xcccccc, 0xcccccc, 0x000000,
+     true, 0xffffff, 0x808080, 0, 0,
+     0xffffc8, 0x000000, 0x000000,
+     0xc00000, 0x0000c0, 0xffcc00, false},
+
+    {"x11", "X11 Motif",
+     0x4a6078, 0xaeb2c3, 0x000000, 0x4a4d57, 0xc9ccd9, 0x000000, 0x000000, 0xffffff,
+     S, 0x6a7fa8, 0x6a7fa8, 0xffffff, true, false, false, true, 0xaeb2c3, 0x000000, 0,
+     0x000000, 0x000000, 0xe0e0e0, false,
+     0xaeb2c3, 0xaeb2c3, 0x000000,
+     true, 0xdfe1ea, 0x5d6069, 0, 0,
+     0xc9ccd9, 0x000000, 0x5d6069,
+     0xa00000, 0x000090, 0xffcc00, false},
+
+    {"winamp", "Winamp",
+     0x000000, 0x2a2a3c, 0x00e000, 0x008000, 0x000000, 0x00e000, 0x0000c6, 0xffffff,
+     V, 0x1a1a40, 0x38385a, 0xc8c8dc, true, true, false, false, 0x2a2a3c, 0xc8c8dc, 0,
+     0x000000, 0x000000, 0x00e000, false,
+     0x2a2a3c, 0x2a2a3c, 0xc8b464,
+     true, 0x7a7a9a, 0x111111, 0, 0,
+     0x000000, 0x00e000, 0x4a4a66,
+     0xffffff, 0xc8b464, 0xc8b464, true},
+};
+
+constexpr int kSkinCount = sizeof(kSkins) / sizeof(kSkins[0]);
+int g_skin = 0;
+
+uint32_t mix(uint32_t a, uint32_t b, int pct_b) {
+    auto ch = [&](int shift) {
+        const int x = (a >> shift) & 0xff, y = (b >> shift) & 0xff;
+        return static_cast<uint32_t>((x * (100 - pct_b) + y * pct_b) / 100) << shift;
+    };
+    return ch(16) | ch(8) | ch(0);
+}
+
+// The game screens were written against one dark palette (style.h). Point that
+// palette at the skin so they follow it.
+void apply_legacy_palette(const Skin& s) {
+    color::kBg = s.face;
+    color::kPanel = s.field;
+    color::kPanelHi = mix(s.field, s.sel, 30);
+    color::kBorder = s.lo;
+    color::kBar = s.status_b;
+    color::kText = s.field_text;
+    color::kDim = s.dim;
+    color::kAccent = s.dark ? s.them : s.sel;
+    if (s.dark) {
+        color::kGood = 0x48d068; color::kWarn = 0xf8b030; color::kBad = 0xe85040; color::kInfo = 0x58a8f8;
+        color::kShiny = 0xf0c8ff;
+    } else {
+        color::kGood = 0x008000; color::kWarn = 0xa06000; color::kBad = 0xc00000; color::kInfo = 0x0000c0;
+        color::kShiny = 0x9030b0;
+    }
+    // A selection colour that is the same as the text (System 7) can't tint rows.
+    if (color::kAccent == color::kText) color::kAccent = s.dim;
+}
+
+} // namespace
+
+int skin_count() { return kSkinCount; }
+const Skin& skin_at(int index) { return kSkins[(index % kSkinCount + kSkinCount) % kSkinCount]; }
+const Skin& skin() { return kSkins[g_skin]; }
+int skin_index() { return g_skin; }
+
+void set_skin(int index) {
+    g_skin = (index % kSkinCount + kSkinCount) % kSkinCount;
+    apply_legacy_palette(kSkins[g_skin]);
+}
+
+int skin_from_id(const char* id) {
+    if (!id) return -1;
+    for (int i = 0; i < kSkinCount; ++i) {
+        if (std::strcmp(kSkins[i].id, id) == 0) return i;
+    }
+    return -1;
+}
+
+} // namespace mm::ui

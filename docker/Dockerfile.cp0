@@ -1,0 +1,11 @@
+# Build image for the CardputerZero arm64 .deb (cp0-cross preset).
+# The CM0 BSP sysroot ships GCC 14 runtime/headers, so the host compiler must be
+# GCC 14 too: Debian trixie. On Apple Silicon this runs natively as linux/arm64.
+FROM debian:trixie
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        cmake ninja-build gcc g++ git ca-certificates rsync file dpkg-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
