@@ -46,6 +46,16 @@ enum class ScreenId : uint8_t {
     Skins,        // skin picker
     Monster,      // MonsterMesh: the game's own menu (party, gyms, battle, ...)
     Radio,        // Meshtastic radio setup
+    Mailbox,      // Mailbox: inbox + outbox that sends when the buddy comes back
+    Map,          // MeshMap: buddies plotted from their shared positions
+    Hood,         // Mesh Neighborhood: nodes in range, signal, hops, ping/traceroute
+    Ringtones,    // Ringtones: compose / play / send one-packet tunes
+    Snake,        // Snake
+    Calc,         // Calculator
+    Mines,        // MeshMines
+    Puzzle,       // Bit Quest
+    Savers,       // Screen Savers
+    Beats,        // MeshBeat drum machine
     Count,
 };
 

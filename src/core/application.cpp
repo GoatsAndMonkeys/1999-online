@@ -183,6 +183,9 @@ struct KeyHooks {
 
 #if !USE_DESKTOP
 lv_display_t* init_device_display() {
+    // Without a delay callback lv_delay_ms() busy-waits, so the main loop's
+    // 5 ms pause pinned a core at ~100%. Sleep for real instead.
+    lv_delay_set_cb([](uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); });
 #if APP_USE_DRM
     auto* display = lv_linux_drm_create();
     if (!display) return nullptr;

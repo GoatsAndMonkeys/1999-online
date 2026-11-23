@@ -10,7 +10,7 @@
 
 cmake_minimum_required(VERSION 3.31)
 
-project(monstermesh VERSION 0.1.0 LANGUAGES C CXX)
+project(monstermesh VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,13 +96,13 @@ file(GLOB_RECURSE MM_APP_SOURCES CONFIGURE_DEPENDS
 # Parallel screen development: -DMM_ONLY_SCREEN=party compiles only
 # screens/party_*.cpp (plus the menu) and stubs the other screens with
 # placeholders, so one screen's half-finished file can't break another's build.
-set(MM_ONLY_SCREEN "" CACHE STRING "Build only this screen (party|daycare|breeding|gym|battle|wifi); empty = all")
+set(MM_ONLY_SCREEN "" CACHE STRING "Build only these screens, ;-separated (party|daycare|breeding|gym|battle|wifi|mailbox|map|hood|ring|snake|calc|mines|puzzle|savers|beats); empty = all")
 if(MM_ONLY_SCREEN)
-    set(_mm_all_screens party daycare breeding gym battle wifi)
+    set(_mm_all_screens party daycare breeding gym battle wifi mailbox map hood ring snake calc mines puzzle savers beats)
     set(_mm_stub "${CMAKE_CURRENT_BINARY_DIR}/mm_screen_stubs.cpp")
     set(_mm_stub_src "// Generated: MM_ONLY_SCREEN=${MM_ONLY_SCREEN}\n#include \"screens.h\"\nnamespace mm::ui {\n")
     foreach(_s IN LISTS _mm_all_screens)
-        if(NOT _s STREQUAL MM_ONLY_SCREEN)
+        if(NOT _s IN_LIST MM_ONLY_SCREEN)
             list(FILTER MM_APP_SOURCES EXCLUDE REGEX "/src/screens/${_s}_[^/]*\\.cpp$")
             string(APPEND _mm_stub_src "std::unique_ptr<Screen> make_${_s}_screen(Ctx& c) { return make_placeholder_screen(c, \"${_s}\", \"(stubbed: MM_ONLY_SCREEN=${MM_ONLY_SCREEN})\"); }\n")
         endif()

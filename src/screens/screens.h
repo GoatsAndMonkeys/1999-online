@@ -25,6 +25,16 @@ std::unique_ptr<Screen> make_amp_screen(Ctx& ctx);
 std::unique_ptr<Screen> make_skins_screen(Ctx& ctx);
 std::unique_ptr<Screen> make_monster_screen(Ctx& ctx);
 std::unique_ptr<Screen> make_radio_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_mailbox_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_map_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_hood_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_ring_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_snake_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_calc_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_mines_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_puzzle_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_savers_screen(Ctx& ctx);
+std::unique_ptr<Screen> make_beats_screen(Ctx& ctx);
 
 // Generic "coming soon" body used by stubs.
 std::unique_ptr<Screen> make_placeholder_screen(Ctx& ctx, const char* title, const char* blurb);

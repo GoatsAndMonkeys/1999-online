@@ -20,11 +20,34 @@
 //     the reason, see send_error_text()). No answer for kAckTimeoutMs =>
 //     Failed, "no answer".
 //   - No hook, or the hook returns 0 (radio not connected) => the message is
-//     KEPT in the chat as Unsent ("Not sent: radio not connected"). Nothing is
-//     queued and nothing is sent later on its own: the user retries.
+//     KEPT in the chat as Unsent ("Not sent: radio not connected"); the
+//     outbox (below) sends it once the radio is up and the contact is online.
+//   - To a known contact that is Offline: not transmitted at all. It is
+//     queued as Unsent with kSendErrQueued ("waiting for them to come
+//     online") and the outbox sends it when the node is heard again.
 //   - retry(node) sends the newest Failed / Unsent message of that chat again
-//     (the IM screen: Enter on an empty input line). The message stays where
-//     it is in the transcript.
+//     (the IM screen: Enter on an empty input line); retry_message(node, i)
+//     sends one given message (the Mailbox: R). The message stays where it is
+//     in the transcript. A manual retry gives the outbox its full budget back.
+//
+// THE OUTBOX (auto-send): every Failed / Unsent message of mine is "queued".
+// tick() sends queued messages on its own, but only:
+//   - with a sender hook (a radio; never in demo mode or --shots, never to a
+//     demo node), to a contact that is Online (heard within MeshBackend::
+//     kOnlineS), with no other message to that contact still Sending;
+//   - oldest first, at most one transmission per kOutboxGapMs across the
+//     whole mesh, at most kOutboxMaxTries automatic tries per message, and
+//     never for a message older than kOutboxMaxAgeS (those wait for R);
+//   - after a failed automatic try, not again before the backoff
+//     (kOutboxBackoffMs doubled per try, at most kOutboxBackoffMaxMs). When
+//     the contact comes back Online (presence changes to Online, or a direct
+//     message from it arrives) the backoff is cleared, the try count is not.
+//   A try that the link refuses (hook returns 0) does not count.
+//
+// MAIL NOTICES ("You've got mail"): receive() of a direct message, and the
+// delivery of a message the outbox sent, queue a MailNotice; a UI pops them
+// with pop_mail_notice() (toast + chime, see mail_chime.h). At most
+// kMaxNotices wait; older ones are dropped.
 //   - Text longer than kMaxMessageBytes is refused: send() returns false and
 //     adds nothing (the IM screen shows a note and keeps the draft).
 //   - A channel message (kChannelNode) is a broadcast. Nobody acks those, so
@@ -105,6 +128,7 @@ enum class SendState : uint8_t {
 constexpr int kSendErrNone = 0;
 constexpr int kSendErrNoRadio = -1;   // link not ready when sending
 constexpr int kSendErrNoAnswer = -2;  // no delivery report within kAckTimeoutMs
+constexpr int kSendErrQueued = -3;    // contact offline: held until it is heard again
 // Short lower-case reason: "no route", "timed out", "radio not connected", ...
 const char* send_error_text(int error);
 
@@ -120,10 +144,26 @@ struct Message {
     int error = kSendErrNone;     // why it is Failed / Unsent
     uint32_t packet_id = 0;       // mine: the radio's packet id while Sending (not saved)
     uint32_t from_node = 0;       // channel messages: who wrote it (0: n/a)
+    // Outbox (mine only).
+    uint8_t tries = 0;            // automatic sends made by the outbox (saved)
+    bool via_outbox = false;      // last sent by the outbox: its delivery raises a notice (saved)
+    uint32_t retry_after_ms = 0;  // backoff: no automatic try before this tick time (not saved)
+    bool backoff = false;         // retry_after_ms is valid
 
     bool retryable() const {
         return from_me && (state == SendState::Failed || state == SendState::Unsent);
     }
+};
+
+// "You've got mail": something the user wants to hear about.
+struct MailNotice {
+    enum class Kind : uint8_t {
+        NewMail,      // a direct message arrived (from node_id)
+        Delivered,    // a queued message (sent by the outbox) reached node_id
+    };
+    Kind kind = Kind::NewMail;
+    uint32_t node_id = 0;
+    std::string text;             // the message
 };
 
 class Messenger {
@@ -133,6 +173,13 @@ public:
     static constexpr size_t kMaxStoredMessages = 200;   // per peer, newest kept
     static constexpr uint32_t kSaveMs = 1000;           // at most one write per second
     static constexpr uint32_t kAckTimeoutMs = 120000;   // Sending -> Failed "no answer"
+    // Outbox (see THE OUTBOX above).
+    static constexpr int kOutboxMaxTries = 4;
+    static constexpr uint32_t kOutboxGapMs = 5000;          // between two automatic sends
+    static constexpr uint32_t kOutboxBackoffMs = 30000;     // after the 1st failed try; doubles
+    static constexpr uint32_t kOutboxBackoffMaxMs = 10 * 60000;
+    static constexpr uint32_t kOutboxMaxAgeS = 3 * 86400;   // older queued messages wait for R
+    static constexpr size_t kMaxNotices = 8;
     // The public channel's conversation (see the header comment).
     static constexpr uint32_t kChannelNode = 0xffffffffu;
     // Hands a text to the radio: the packet id, or 0 if it could not be sent.
@@ -183,6 +230,24 @@ public:
     // Sends that message again. false if there is none; true otherwise (look
     // at the message's state for how it went: Sending / Sent, or Unsent again).
     bool retry(uint32_t node_id);
+    // Sends message `index` of that chat again now (it must be retryable()).
+    // Resets its automatic tries. To a demo node: simulated, never sent.
+    bool retry_message(uint32_t node_id, int index);
+    // Removes one message (the Mailbox only offers it for queued ones). A
+    // Sending one stops waiting for its report; an unread one stops counting.
+    // false for a bad index. The chat stays even when it becomes empty.
+    bool delete_message(uint32_t node_id, int index);
+    // Would the outbox send it on its own (retryable, tries left, not too
+    // old)? Demo nodes say yes too; tick() still never sends in demo mode.
+    // Direct chats only: channel messages are never sent on their own.
+    bool auto_send_pending(uint32_t node_id, const Message& m) const;
+    // ms until the outbox may try it (0: as soon as the contact is online).
+    uint32_t auto_send_wait_ms(const Message& m) const;
+    // Number of queued (retryable) + Sending messages of mine, all chats.
+    int outbox_count() const;
+    // The oldest waiting notice; false if none.
+    bool pop_mail_notice(MailNotice& out);
+    bool has_mail_notice() const { return !notices_.empty(); }
     void mark_read(uint32_t node_id);
     void delete_chat(uint32_t node_id);
     // Call ~30 Hz from the screen on top; delivers due demo replies.
@@ -240,6 +305,10 @@ private:
     void seed_demo();
     Chat& chat_for(uint32_t node_id);                 // creates it (demo flag set here)
     void transmit(uint32_t node_id, Message& m);      // through sender_: sets state
+    void resend(uint32_t node_id, Message& m);        // retry: real or simulated (demo node)
+    void wake_outbox(uint32_t node_id);               // contact is back: clear the backoff
+    void run_outbox(uint32_t now_ms);
+    void notify(MailNotice::Kind kind, uint32_t node_id, const std::string& text);
     Message* find_packet(uint32_t packet_id, uint32_t* node = nullptr);
     void bump() { ++revision_; }
     void touch_chats() { chats_dirty_ = true; }   // a chat changed: save soon
@@ -249,6 +318,12 @@ private:
     std::map<uint32_t, Chat> chats_;
     std::vector<PendingReply> pending_;
     std::vector<InFlight> inflight_;
+    std::vector<MailNotice> notices_;
+    uint32_t now_ms_ = 0;           // the latest tick() time
+    bool ticked_ = false;
+    uint32_t last_auto_ms_ = 0;     // last automatic send
+    bool auto_sent_ = false;        // last_auto_ms_ is valid
+    uint32_t outbox_check_ms_ = 0;
     std::set<uint32_t> demo_nodes_;   // the seeded contacts, until go_live() / clear()
     Sender sender_;
     uint32_t revision_ = 1;

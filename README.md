@@ -4,8 +4,20 @@ A retro Meshtastic messenger for the M5Stack **Cardputer Zero**, dressed up as
 the internet of 1999: an AIM-style Buddy List and Instant Message windows, a
 MySpace-style **Mesh Space** profile page, **MeshAmp** (a Winamp-style player
 with a MilkDrop-style visualizer), swappable desktop skins (Windows 95/ME/XP,
-Mac OS 9, System 7, BeOS, OS/2, X11, Winamp), and **MonsterMesh**, a
+Mac OS 9, System 7, BeOS, OS/2, X11, Mac OS X, Winamp), and **MonsterMesh**, a
 monster-breeding and gym-battle game played over the mesh.
+
+Also in the launcher:
+
+* **Mailbox**: messages to buddies who are offline wait in an outbox and send
+  when they come back ("You've got mail!").
+* **MeshMap**: a road-atlas-style map of the nodes that share their position.
+* **Neighborhood**: every node in range, with signal, hops, ping and traceroute.
+* **Ringtones**: an RTTTL ringtone composer; send a tune to a buddy.
+* **MeshBeat**: a 16-step, 8-track drum machine with synthesized drums and
+  preset beats; send a beat to a buddy.
+* **Snake** (DOS-style, or a phone-LCD look), **MeshMines**, **Bit Quest**
+  (a 10-board tile puzzle), a **Calculator** and **Screen Savers**.
 
 It is a native C++17 / LVGL 9 app for the Cardputer Zero (Pi CM0, aarch64,
 1.9" 320x170 screen, 46-key keyboard). It also runs as an SDL desktop
@@ -15,23 +27,26 @@ simulator on macOS and Linux.
 |---|---|---|
 | ![Buddy List](docs/screenshots/buddylist-w95.png) | ![Instant Message](docs/screenshots/im-w95.png) | ![Mesh Space](docs/screenshots/meshspace-profile-w95.png) |
 | ![MeshAmp](docs/screenshots/meshamp_visuals_winamp.png) | ![Launcher](docs/screenshots/launcher-xp.png) | ![Skins](docs/screenshots/skins-mac9.png) |
+| ![MeshBeat](docs/screenshots/meshbeat.png) | ![Ringtones](docs/screenshots/ringtones.png) | ![Mailbox](docs/screenshots/mailbox.png) |
+| ![MeshMap](docs/screenshots/meshmap.png) | ![Neighborhood](docs/screenshots/neighborhood.png) | ![Snake](docs/screenshots/snake.png) |
+| ![MeshMines](docs/screenshots/meshmines.png) | ![Bit Quest](docs/screenshots/bitquest.png) | ![Calculator](docs/screenshots/calculator.png) |
 
 > **Status:** work in progress. The UI is changing quickly.
 
 ## Install on the Cardputer Zero
 
-1. Download `1999Online_0.1.0_rev1_arm64.deb` from the
+1. Download `1999Online_0.2.0_rev1_arm64.deb` from the
    [latest release](https://github.com/GoatsAndMonkeys/1999-online/releases/latest).
 2. Copy it to the device:
 
    ```bash
-   scp 1999Online_0.1.0_rev1_arm64.deb <user>@cardputerzero.local:/tmp/
+   scp 1999Online_0.2.0_rev1_arm64.deb <user>@cardputerzero.local:/tmp/
    ```
 
 3. On the device, install it:
 
    ```bash
-   sudo apt install /tmp/1999Online_0.1.0_rev1_arm64.deb
+   sudo apt install /tmp/1999Online_0.2.0_rev1_arm64.deb
    ```
 
    To update an installed copy to a new build of the same version, add
@@ -82,7 +97,7 @@ Flags:
 ## Build: arm64 .deb for the device
 
 ```bash
-scripts/build-deb.sh                   # -> dist/1999Online_0.1.0_rev1_arm64.deb
+scripts/build-deb.sh                   # -> dist/1999Online_0.2.0_rev1_arm64.deb
 ```
 
 The script cross-builds inside a `linux/arm64` Debian trixie container (Docker;
@@ -134,7 +149,7 @@ Settings, conversations and your Mesh Space page are small JSON files in
 |---|---|
 | `src/core/` | Application startup, screen router, key handling |
 | `src/ui/` | Skins, widgets, the visualizer |
-| `src/screens/` | One file per screen (buddy list, IM, Mesh Space, MeshAmp, radio, skins, MonsterMesh screens) |
+| `src/screens/` | One file per screen (buddy list, IM, Mesh Space, MeshAmp, radio, skins, MonsterMesh screens, the apps and games) |
 | `src/backend/` | Meshtastic link, messenger model, settings, game state |
 | `src/sprites/` | Monster sprites → LVGL images |
 | `src/app, platform, view, logger, config` | Infrastructure adapted from [CardputerZero/Template](https://github.com/CardputerZero/Template) |

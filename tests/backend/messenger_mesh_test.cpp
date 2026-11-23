@@ -210,12 +210,13 @@ static void test_demo_unchanged(const std::string& dir) {
     CHECK(m.messages(kTrail).back().state == SendState::Delivered && m.messages(kTrail).back().delivered);
     for (uint32_t t = 0; t < 3000; t += 33) m.tick(t);
     CHECK(!m.messages(kTrail).back().from_me);            // the canned reply
-    // an offline demo node never acks, as before
+    // an offline demo node: the message waits in the outbox
     CHECK(m.send(0x3202a9f7, "u there?"));
     CHECK(!m.messages(0x3202a9f7).back().delivered);
-    CHECK(m.messages(0x3202a9f7).back().state == SendState::Sending);
+    CHECK(m.messages(0x3202a9f7).back().state == SendState::Unsent);
+    CHECK(m.messages(0x3202a9f7).back().error == kSendErrQueued);
     m.tick(3000 + 2 * Messenger::kAckTimeoutMs);
-    CHECK(m.messages(0x3202a9f7).back().state == SendState::Sending);   // demo: no timeout
+    CHECK(m.messages(0x3202a9f7).back().state == SendState::Unsent);    // demo: the outbox never sends
 }
 
 static void test_go_live(const std::string& dir) {

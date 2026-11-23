@@ -315,7 +315,7 @@ private:
                         l.text = std::string("Not delivered: ") + send_error_text(msg.error);
                         break;
                     case SendState::Unsent:
-                        l.text = std::string("Not sent: ") + send_error_text(msg.error);
+                        l.text = msg.error == kSendErrQueued ? std::string("Queued: sends when they come online") : std::string("Not sent: ") + send_error_text(msg.error);
                         break;
                     case SendState::Delivered:
                         if (channel) {

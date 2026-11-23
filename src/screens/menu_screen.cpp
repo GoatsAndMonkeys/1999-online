@@ -1,5 +1,5 @@
-// menu_screen.cpp — 1999 Online home: one launcher window with a 3x2 grid of
-// program icons. The game lives in its own program, MonsterMesh.
+// menu_screen.cpp — 1999 Online home: one launcher window with a 4-column grid
+// of program icons that scrolls by row. The game lives in its own program, MonsterMesh.
 #include "screens.h"
 
 #include "game_state.h"
@@ -18,16 +18,26 @@ struct Tile {
 };
 
 constexpr Tile kTiles[] = {
-    {ScreenId::Buddies, "Buddy List",  "buddy",            0},
-    {ScreenId::Space,   "Mesh Space",  LV_SYMBOL_HOME,     0},
-    {ScreenId::Amp,     "MeshAmp",     "bolt",             0},
-    {ScreenId::Monster, "MonsterMesh", nullptr,            25},
-    {ScreenId::Radio,   "Radio Setup", LV_SYMBOL_SETTINGS, 0},
-    {ScreenId::Skins,   "Skins",       LV_SYMBOL_TINT,     0},
+    {ScreenId::Buddies,   "Buddy List",   "buddy",              0},
+    {ScreenId::Space,     "Mesh Space",   LV_SYMBOL_HOME,       0},
+    {ScreenId::Amp,       "MeshAmp",      "bolt",               0},
+    {ScreenId::Monster,   "MonsterMesh",  nullptr,              25},
+    {ScreenId::Mailbox,   "Mailbox",      LV_SYMBOL_ENVELOPE,   0},
+    {ScreenId::Map,       "MeshMap",      LV_SYMBOL_GPS,        0},
+    {ScreenId::Hood,      "Neighborhood", LV_SYMBOL_WIFI,       0},
+    {ScreenId::Ringtones, "Ringtones",    LV_SYMBOL_AUDIO,      0},
+    {ScreenId::Beats,     "MeshBeat",     LV_SYMBOL_BELL,       0},
+    {ScreenId::Snake,     "Snake",        nullptr,              23},
+    {ScreenId::Mines,     "MeshMines",    LV_SYMBOL_WARNING,    0},
+    {ScreenId::Puzzle,    "Bit Quest",    LV_SYMBOL_SHUFFLE,    0},
+    {ScreenId::Calc,      "Calculator",   LV_SYMBOL_PLUS,       0},
+    {ScreenId::Savers,    "Screen Savers",LV_SYMBOL_IMAGE,      0},
+    {ScreenId::Radio,     "Radio Setup",  LV_SYMBOL_SETTINGS,   0},
+    {ScreenId::Skins,     "Skins",        LV_SYMBOL_TINT,       0},
 };
 constexpr int kTileCount = sizeof(kTiles) / sizeof(kTiles[0]);
-constexpr int kCols = 3;
-constexpr int kCellW = (kClientW - 4) / kCols;   // 61
+constexpr int kCols = 4;
+constexpr int kCellW = (kClientW - 4) / kCols;   // 77
 constexpr int kCellH = 58;
 
 class MenuScreen final : public Screen {
@@ -41,6 +51,9 @@ public:
     void build(lv_obj_t* body) override {
         const Skin& s = skin();
         lv_obj_t* f = win::field(body, 0, 0, kClientW, kClientH);
+        field_ = f;
+        lv_obj_add_flag(f, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(f, LV_SCROLLBAR_MODE_AUTO);
         for (int i = 0; i < kTileCount; ++i) {
             const int x = 2 + (i % kCols) * kCellW;
             const int y = 2 + (i / kCols) * kCellH;
@@ -124,12 +137,23 @@ private:
             const bool on = i == nav_.sel;
             lv_obj_set_style_bg_color(names_[i], c(s.sel), 0);
             lv_obj_set_style_bg_opa(names_[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+            if (on && field_) {
+                // Keep the selected row in view: the grid is taller than the window.
+                const int row = i / kCols;
+                const int top = row * kCellH;
+                const int view = kClientH - 4;
+                int sy = lv_obj_get_scroll_y(field_);
+                if (top < sy) sy = top;
+                else if (top + kCellH > sy + view) sy = top + kCellH - view;
+                lv_obj_scroll_to_y(field_, sy, LV_ANIM_OFF);
+            }
             lv_obj_set_style_text_color(names_[i], c(on ? s.sel_text : s.field_text), 0);
         }
     }
 
     GridNav nav_;
     lv_obj_t* names_[kTileCount] = {};
+    lv_obj_t* field_ = nullptr;
 };
 
 } // namespace

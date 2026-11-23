@@ -58,9 +58,14 @@ namespace {
 //   FromRadio      id=1 V  packet=2 L  my_info=3 L  node_info=4 L  config=5 L
 //                  config_complete_id=7 V  rebooted=8 V  queueStatus=11 L
 //   MyNodeInfo     my_node_num=1 V
-//   NodeInfo       num=1 V  user=2 L(User)  snr=4 F(float)  last_heard=5 F
+//   NodeInfo       num=1 V  user=2 L(User)  position=3 L(Position)
+//                  snr=4 F(float)  last_heard=5 F
 //                  device_metrics=6 L(DeviceMetrics)  hops_away=9 V (optional)
 //   User           id=1 L  long_name=2 L  short_name=3 L
+//   Position       latitude_i=1 F(sfixed32, 1e-7 deg)  longitude_i=2 F(sfixed32)
+//                  altitude=3 V(int32)  time=4 F
+//   RouteDiscovery route=1 F(repeated fixed32)  snr_towards=2 V(repeated int32, dB*4)
+//                  route_back=3 F(repeated)  snr_back=4 V(repeated)  (packed or not)
 //   DeviceMetrics  battery_level=1 V (optional)
 //   Telemetry      device_metrics=2 L(DeviceMetrics)
 //   MeshPacket     from=1 F  to=2 F  channel=3 V  decoded=4 L(Data)
@@ -75,8 +80,8 @@ namespace {
 //   LoRaConfig     use_preset=1 V  modem_preset=2 V  hop_limit=8 V
 //   Channel        index=1 V  settings=2 L(ChannelSettings)  role=3 V (FromRadio.channel=10)
 //   ChannelSettings name=3 L
-//   PortNum        TEXT_MESSAGE_APP=1  NODEINFO_APP=4  ROUTING_APP=5
-//                  TELEMETRY_APP=67
+//   PortNum        TEXT_MESSAGE_APP=1  POSITION_APP=3  NODEINFO_APP=4  ROUTING_APP=5
+//                  TELEMETRY_APP=67  TRACEROUTE_APP=70  PRIVATE_APP=256
 //   Priority       RELIABLE=70
 //   Routing.Error  NONE=0  TIMEOUT=3  NO_INTERFACE=4
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,10 +93,14 @@ enum : uint32_t {
 
     kMyNodeInfoMyNodeNum = 1,
 
-    kNodeInfoNum = 1, kNodeInfoUser = 2, kNodeInfoSnr = 4, kNodeInfoLastHeard = 5,
+    kNodeInfoNum = 1, kNodeInfoUser = 2, kNodeInfoPosition = 3, kNodeInfoSnr = 4, kNodeInfoLastHeard = 5,
     kNodeInfoDeviceMetrics = 6, kNodeInfoHopsAway = 9,
 
     kUserLongName = 2, kUserShortName = 3,
+
+    kPositionLat = 1, kPositionLon = 2, kPositionAlt = 3, kPositionTime = 4,
+
+    kRouteRoute = 1, kRouteSnrTowards = 2, kRouteBack = 3, kRouteSnrBack = 4,
 
     kDeviceMetricsBatteryLevel = 1,
     kTelemetryDeviceMetrics = 2,
@@ -111,7 +120,8 @@ enum : uint32_t {
 
     kChannelIndex = 1, kChannelSettings = 2, kChannelSettingsName = 3,
 
-    kPortText = 1, kPortNodeInfo = 4, kPortRouting = 5, kPortTelemetry = 67,
+    kPortText = 1, kPortPosition = 3, kPortNodeInfo = 4, kPortRouting = 5, kPortTelemetry = 67,
+    kPortTraceroute = 70, kPortPrivate = 256,
 
     kPriorityReliable = 70,
 };
@@ -130,6 +140,8 @@ constexpr size_t kMaxEvents = 256;
 constexpr size_t kMaxReadPerPoll = 16384;
 constexpr size_t kSeenTexts = 32;
 constexpr int kMaxChannel = 7;
+constexpr size_t kMaxProbes = 8;
+constexpr size_t kMaxRouteHops = 16;         // RouteDiscovery holds at most 8 per list
 
 constexpr uint64_t kBackoffMinMs = 1000, kBackoffMaxMs = 30000;
 constexpr uint64_t kConnectTimeoutMs = 10000;
@@ -400,6 +412,89 @@ bool decode_device_metrics(Reader r, int& battery) {
     return r.ok;
 }
 
+struct PbPosition {
+    bool has_lat = false, has_lon = false;
+    int32_t lat_i = 0, lon_i = 0;
+    int32_t alt = 0;
+    uint32_t time = 0;
+};
+
+bool decode_position(Reader r, PbPosition& p) {
+    uint32_t f, w;
+    while (r.next(f, w)) {
+        if (f == kPositionLat && w == kWireFixed32) { p.lat_i = (int32_t)r.fixed32(); p.has_lat = true; }
+        else if (f == kPositionLon && w == kWireFixed32) { p.lon_i = (int32_t)r.fixed32(); p.has_lon = true; }
+        else if (f == kPositionAlt && w == kWireVarint) p.alt = (int32_t)(uint32_t)r.varint();
+        else if (f == kPositionTime && w == kWireFixed32) p.time = r.fixed32();
+        else r.skip(w);
+    }
+    return r.ok;
+}
+
+// Store a decoded position on the node: false (node untouched) for "no fix"
+// (0, 0) and for coordinates out of range. `heard` stands in for a missing
+// fix time.
+bool apply_position(MeshNode& n, const PbPosition& p, uint32_t heard) {
+    if (!p.has_lat || !p.has_lon || (p.lat_i == 0 && p.lon_i == 0)) return false;
+    if (p.lat_i < -900000000 || p.lat_i > 900000000) return false;
+    if (p.lon_i < -1800000000 || p.lon_i > 1800000000) return false;
+    n.has_position = true;
+    n.latitude = p.lat_i * 1e-7;
+    n.longitude = p.lon_i * 1e-7;
+    n.altitude = (p.alt > -1000 && p.alt < 100000) ? (int)p.alt : 0;
+    n.position_time = p.time != 0 ? p.time : heard;
+    return true;
+}
+
+// One element (unpacked) or a packed run of a repeated fixed32 / int32 field.
+void read_repeated_fixed32(Reader& r, uint32_t wire, std::vector<uint32_t>& out) {
+    if (wire == kWireFixed32) {
+        uint32_t v = r.fixed32();
+        if (r.ok && out.size() < kMaxRouteHops) out.push_back(v);
+    } else if (wire == kWireLen) {
+        Reader sub = r.bytes();
+        while (r.ok && sub.left() >= 4) {
+            uint32_t v = sub.fixed32();
+            if (out.size() < kMaxRouteHops) out.push_back(v);
+        }
+    } else {
+        r.skip(wire);
+    }
+}
+void read_repeated_snr(Reader& r, uint32_t wire, std::vector<float>& out) {
+    auto add = [&](uint64_t raw) {
+        int32_t v = (int32_t)(uint32_t)raw;      // int32: negatives are 10-byte varints
+        if (out.size() >= kMaxRouteHops) return;
+        // INT8_MIN marks a hop that could not record its SNR.
+        out.push_back(v == -128 ? MeshProbe::kNoSnr : (float)v / 4.0f);
+    };
+    if (wire == kWireVarint) {
+        uint64_t v = r.varint();
+        if (r.ok) add(v);
+    } else if (wire == kWireLen) {
+        Reader sub = r.bytes();
+        while (r.ok && sub.ok && sub.left() > 0) {
+            uint64_t v = sub.varint();
+            if (sub.ok) add(v);
+        }
+    } else {
+        r.skip(wire);
+    }
+}
+
+bool decode_route(Reader r, MeshProbe& p) {
+    p.route.clear(); p.route_back.clear(); p.snr_towards.clear(); p.snr_back.clear();
+    uint32_t f, w;
+    while (r.next(f, w)) {
+        if (f == kRouteRoute) read_repeated_fixed32(r, w, p.route);
+        else if (f == kRouteBack) read_repeated_fixed32(r, w, p.route_back);
+        else if (f == kRouteSnrTowards) read_repeated_snr(r, w, p.snr_towards);
+        else if (f == kRouteSnrBack) read_repeated_snr(r, w, p.snr_back);
+        else r.skip(w);
+    }
+    return r.ok;
+}
+
 // True if `r` parses as a sequence of well-formed top-level fields.
 bool well_formed(Reader r) {
     uint32_t f, w;
@@ -410,7 +505,9 @@ bool well_formed(Reader r) {
 bool same_node(const MeshNode& a, const MeshNode& b) {
     return a.num == b.num && a.long_name == b.long_name && a.short_name == b.short_name &&
            a.snr == b.snr && a.hops_away == b.hops_away && a.last_heard == b.last_heard &&
-           a.battery == b.battery && a.is_me == b.is_me;
+           a.battery == b.battery && a.is_me == b.is_me && a.has_position == b.has_position &&
+           a.latitude == b.latitude && a.longitude == b.longitude && a.altitude == b.altitude &&
+           a.position_time == b.position_time;
 }
 
 bool set_nonblock(int fd) {
@@ -635,6 +732,7 @@ struct MeshLink::Impl {
         close_fd();
         free_addrs();
         fail_unsent();
+        fail_probes(kErrNoInterface);
         rx.clear();
         want_config_due = false;
         schedule_retry(why);
@@ -655,6 +753,7 @@ struct MeshLink::Impl {
         // Texts already handed to the radio can no longer be confirmed.
         for (const Pending& p : pending) report_ack(p.id, false, kErrNoInterface);
         pending.clear();
+        fail_probes(kErrNoInterface);
         rx.clear();
         want_config_due = false;
         backoff = kBackoffMinMs;
@@ -999,8 +1098,9 @@ struct MeshLink::Impl {
 
     void handle_node_info(Reader r) {
         uint32_t f, w, num = 0, last_heard = 0;
-        bool has_user = false, has_hops = false, has_metrics = false;
+        bool has_user = false, has_hops = false, has_metrics = false, has_pos = false;
         PbUser user;
+        PbPosition pos;
         float snr = 0.0f;
         int hops = -1, battery = -1;
         while (r.next(f, w)) {
@@ -1011,6 +1111,11 @@ struct MeshLink::Impl {
                 user = PbUser();
                 if (!decode_user(sub, user)) return;
                 has_user = true;
+            } else if (f == kNodeInfoPosition && w == kWireLen) {
+                Reader sub = r.bytes();
+                if (!r.ok) break;
+                pos = PbPosition();
+                has_pos = decode_position(sub, pos);
             } else if (f == kNodeInfoSnr && w == kWireFixed32) snr = r.f32();
             else if (f == kNodeInfoLastHeard && w == kWireFixed32) last_heard = r.fixed32();
             else if (f == kNodeInfoDeviceMetrics && w == kWireLen) {
@@ -1035,6 +1140,7 @@ struct MeshLink::Impl {
             n.last_heard = last_heard;
             n.hops_away = has_hops ? hops : -1;
             if (has_metrics && battery >= 0) n.battery = battery;
+            if (has_pos) apply_position(n, pos, last_heard);   // no fix: keep what we had
             n.is_me = (num == L.my_node_);
         });
     }
@@ -1124,6 +1230,76 @@ struct MeshLink::Impl {
         if (!r.ok || packet_id == 0 || res == 0) return;
         int err = (res > 0 && res < 1000) ? (int)res : kErrNoInterface;
         finish_pending(packet_id, false, err);
+        finish_probe(packet_id, false, err);
+    }
+
+    // ── probes ──────────────────────────────────────────────────────────────
+    MeshProbe* waiting_probe(uint32_t id) {
+        if (id == 0) return nullptr;
+        for (MeshProbe& p : L.probes_)
+            if (p.id == id && p.status == MeshProbe::Status::Waiting) return &p;
+        return nullptr;
+    }
+    void finish_probe(uint32_t id, bool ok, int error) {
+        MeshProbe* p = waiting_probe(id);
+        if (!p) return;
+        p->status = ok ? MeshProbe::Status::Done : MeshProbe::Status::Failed;
+        p->error = ok ? kErrNone : error;
+        p->done_ms = now;
+        ++L.probes_rev_;
+    }
+    void fail_probes(int error) {
+        for (MeshProbe& p : L.probes_)
+            if (p.status == MeshProbe::Status::Waiting) finish_probe(p.id, false, error);
+    }
+    uint32_t send_probe(uint32_t to, MeshProbe::Kind kind) {
+        if (L.state_ != State::Ready || !connected()) return 0;
+        if (to == 0 || to == kBroadcast || to == L.my_node_) return 0;
+        if (txq.size() >= kMaxTxFrames) return 0;
+        for (const MeshProbe& p : L.probes_)
+            if (p.status == MeshProbe::Status::Waiting) return 0;
+
+        uint32_t id;
+        for (;;) {
+            id = random_id();
+            bool clash = false;
+            for (const Pending& p : pending) clash = clash || p.id == id;
+            for (const MeshProbe& p : L.probes_) clash = clash || p.id == id;
+            if (!clash) break;
+        }
+        std::string data, pkt;
+        if (kind == MeshProbe::Kind::Traceroute) {
+            // An empty RouteDiscovery; each hop adds itself on the way.
+            put_uint(data, kDataPortnum, kPortTraceroute);
+            put_bytes(data, kDataPayload, std::string());
+            put_uint(data, kDataWantResponse, 1);
+            put_fixed32(pkt, kPacketTo, to);
+            put_bytes(pkt, kPacketDecoded, data);
+            put_fixed32(pkt, kPacketId, id);
+            if (lora_hop_limit != 0) put_uint(pkt, kPacketHopLimit, lora_hop_limit);
+        } else {
+            // No payload at all: nothing for any app to act on, only the ack.
+            put_uint(data, kDataPortnum, kPortPrivate);
+            put_fixed32(pkt, kPacketTo, to);
+            put_bytes(pkt, kPacketDecoded, data);
+            put_fixed32(pkt, kPacketId, id);
+            if (lora_hop_limit != 0) put_uint(pkt, kPacketHopLimit, lora_hop_limit);
+            put_uint(pkt, kPacketWantAck, 1);
+            put_uint(pkt, kPacketPriority, kPriorityReliable);
+        }
+        std::string msg;
+        put_bytes(msg, kToRadioPacket, pkt);
+        if (!enqueue(frame(msg), 0)) return 0;
+
+        if (L.probes_.size() >= kMaxProbes) L.probes_.erase(L.probes_.begin());
+        MeshProbe p;
+        p.id = id;
+        p.to = to;
+        p.kind = kind;
+        p.sent_ms = now;
+        L.probes_.push_back(std::move(p));
+        ++L.probes_rev_;
+        return id;
     }
 
     bool seen_text(uint32_t from, uint32_t id) {
@@ -1195,6 +1371,38 @@ struct MeshLink::Impl {
             });
             break;
         }
+        case kPortPosition: {
+            if (from == 0) return;
+            PbPosition pos;
+            if (!decode_position(d.payload, pos)) return;
+            uint32_t heard = pk.rx_time;
+            if (heard == 0) {
+                std::time_t t = std::time(nullptr);
+                if (t > 1600000000) heard = (uint32_t)t;
+            }
+            edit_node(from, [&](MeshNode& n) { apply_position(n, pos, heard); });
+            break;
+        }
+        case kPortTraceroute: {
+            // Only the answer to one of our requests; requests from others
+            // are the firmware's business.
+            MeshProbe* pr = waiting_probe(d.request_id);
+            if (!pr || pr->kind != MeshProbe::Kind::Traceroute || from != pr->to) return;
+            MeshProbe got = *pr;
+            if (!decode_route(d.payload, got)) return;
+            // Firmware appends the last hop's SNR (its own) to snr_back before
+            // handing the packet over; add it if an older one did not.
+            if (!got.route_back.empty() || !got.snr_back.empty()) {
+                if (got.snr_back.size() == got.route_back.size() && pk.has_snr && got.snr_back.size() < kMaxRouteHops)
+                    got.snr_back.push_back(pk.rx_snr);
+            }
+            got.hops = (pk.hop_start != 0 && pk.hop_start >= pk.hop_limit)
+                           ? (int)std::min<uint32_t>(pk.hop_start - pk.hop_limit, 64) : -1;
+            got.snr = pk.has_snr ? pk.rx_snr : MeshProbe::kNoSnr;
+            *pr = std::move(got);
+            finish_probe(d.request_id, true, kErrNone);
+            break;
+        }
         case kPortTelemetry: {
             if (from == 0) return;
             Reader t = d.payload;
@@ -1213,6 +1421,27 @@ struct MeshLink::Impl {
         }
         case kPortRouting: {
             if (d.request_id == 0) return;
+            if (MeshProbe* pr = waiting_probe(d.request_id)) {
+                Reader rt = d.payload;
+                uint32_t f, w;
+                uint64_t err = 0;
+                while (rt.next(f, w)) {
+                    if (f == kRoutingErrorReason && w == kWireVarint) err = rt.varint();
+                    else rt.skip(w);
+                }
+                if (!rt.ok) return;
+                if (err != 0) {
+                    finish_probe(d.request_id, false, err < 1000 ? (int)err : kErrNoInterface);
+                } else if (pr->kind == MeshProbe::Kind::Ping && from == pr->to) {
+                    pr->hops = (pk.hop_start != 0 && pk.hop_start >= pk.hop_limit)
+                                   ? (int)std::min<uint32_t>(pk.hop_start - pk.hop_limit, 64) : -1;
+                    pr->snr = pk.has_snr ? pk.rx_snr : MeshProbe::kNoSnr;
+                    finish_probe(d.request_id, true, kErrNone);
+                }
+                // else: an implicit ack (a relay heard it); a traceroute is
+                // done only when the route comes back.
+                return;
+            }
             auto it = std::find_if(pending.begin(), pending.end(),
                                    [&](const Pending& p) { return p.id == d.request_id; });
             if (it == pending.end()) return;
@@ -1250,6 +1479,9 @@ struct MeshLink::Impl {
                 ++i;
             }
         }
+        for (MeshProbe& p : L.probes_)
+            if (p.status == MeshProbe::Status::Waiting && now >= p.sent_ms + kProbeTimeoutMs)
+                finish_probe(p.id, false, kErrTimeout);
     }
 
     void run(uint64_t now_ms) {
@@ -1449,6 +1681,15 @@ uint32_t MeshLink::send_text(uint32_t to, const std::string& text, int channel) 
     return id;
 }
 
+uint32_t MeshLink::send_traceroute(uint32_t to) { return impl_->send_probe(to, MeshProbe::Kind::Traceroute); }
+uint32_t MeshLink::send_ping(uint32_t to) { return impl_->send_probe(to, MeshProbe::Kind::Ping); }
+
+const MeshProbe* MeshLink::probe(uint32_t id) const {
+    for (const MeshProbe& p : probes_)
+        if (p.id == id) return &p;
+    return nullptr;
+}
+
 std::string MeshLink::node_id_text(uint32_t num) {
     char buf[16];
     std::snprintf(buf, sizeof buf, "!%08x", (unsigned)num);
@@ -1458,6 +1699,90 @@ std::string MeshLink::node_id_text(uint32_t num) {
 MeshLink& mesh_link() {
     static MeshLink link;
     return link;
+}
+
+// ── demo data ───────────────────────────────────────────────────────────────
+// Same node ids and names as the messenger's demo contacts (messenger.cpp),
+// placed around a river town (positions are made up).
+namespace {
+constexpr uint32_t kDemoMe = 0x1999c0de;
+constexpr double kDemoLat = 44.0521, kDemoLon = -123.0868;
+constexpr uint32_t kDemoKd2abc = 0xa3f29c01, kDemoRidge = 0x7c11d402, kDemoTrail = 0x5be0a903,
+                   kDemoHill = 0x41110001, kDemoN0call = 0x000ca117, kDemoBase = 0xba5e5701;
+}
+
+std::vector<MeshNode> mesh_demo_nodes(uint32_t now) {
+    struct D {
+        uint32_t num;
+        const char* lname;
+        const char* sname;
+        float snr;
+        int hops;
+        uint32_t ago;        // seconds since heard
+        int batt;
+        double dn_km, de_km; // north / east of me; kNoPos = no position
+        int alt;
+    };
+    constexpr double nan = 1e9, kNoPos = 1e9, kPi = 3.14159265358979323846;
+    static const D kD[] = {
+        {kDemoMe, "xXmeshKid03Xx", "mK03", 0.0f, -1, 0, 76, 0.0, 0.0, 128},
+        {kDemoKd2abc, "KD2ABC-m", "KD2A", 6.5f, 2, 60, 84, 3.1, 4.4, 612},
+        {kDemoRidge, "Ridge_Gym", "RDGE", 3.25f, 1, 25, 101, 1.6, -2.3, 240},
+        {0x0a5b3c4d, "ash_k3tchup", "ASH", -7.5f, 3, 3 * 3600, 22, nan, nan, 0},
+        {kDemoTrail, "Trailhead-R", "TRLH", 9.0f, 1, 40, 91, -2.4, 3.0, 410},
+        {kDemoBase, "base_stn", "BASE", 11.25f, 0, 5 * 60, 101, 0.35, 0.55, 131},
+        {0x3202a9f7, "W2XYZ", "W2XY", -12.0f, 4, 26 * 3600, 8, nan, nan, 0},
+        {kDemoHill, "HilltopRelay", "HILL", 4.75f, 0, 15, 101, 1.1, 1.9, 520},
+        {kDemoN0call, "N0CALL-7", "N0C7", -2.5f, 3, 4 * 60, 63, 5.2, 6.8, 300},
+        {0x5011a4b2, "solar_shed", "SOLR", 1.5f, 2, 9 * 60, 47, -1.2, -3.9, 160},
+        {0xc4b10ca7, "CabinFever99", "CBN9", -4.0f, 3, 22 * 60, 71, -4.6, -6.1, 880},
+    };
+    const double km_lat = 1.0 / 110.574, km_lon = 1.0 / (111.320 * std::cos(kDemoLat * kPi / 180.0));
+    std::vector<MeshNode> out;
+    for (const D& d : kD) {
+        MeshNode n;
+        n.num = d.num;
+        n.long_name = d.lname;
+        n.short_name = d.sname;
+        n.snr = d.snr;
+        n.hops_away = d.hops;
+        n.last_heard = now > d.ago ? now - d.ago : 0;
+        n.battery = d.batt;
+        n.is_me = d.num == kDemoMe;
+        if (d.dn_km != kNoPos) {
+            n.has_position = true;
+            n.latitude = kDemoLat + d.dn_km * km_lat;
+            n.longitude = kDemoLon + d.de_km * km_lon;
+            n.altitude = d.alt;
+            n.position_time = n.last_heard;
+        }
+        out.push_back(std::move(n));
+    }
+    return out;
+}
+
+MeshProbe mesh_demo_probe(uint32_t to, MeshProbe::Kind kind) {
+    MeshProbe p;
+    p.id = 0x00de0001;
+    p.to = to;
+    p.kind = kind;
+    p.status = MeshProbe::Status::Done;
+    p.sent_ms = 1000;
+    if (kind == MeshProbe::Kind::Ping) {
+        p.done_ms = p.sent_ms + 1840;
+        p.hops = 0;
+        p.snr = 7.25f;
+        return p;
+    }
+    // Out over the hilltop relay and the ridge, back over the relay alone.
+    p.route = {kDemoHill, kDemoRidge};
+    p.snr_towards = {8.5f, 4.25f, 6.0f};
+    p.route_back = {kDemoHill};
+    p.snr_back = {5.75f, 9.0f};
+    p.done_ms = p.sent_ms + 4620;
+    p.hops = 1;
+    p.snr = 9.0f;
+    return p;
 }
 
 } // namespace mm

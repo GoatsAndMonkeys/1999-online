@@ -62,6 +62,7 @@ const char* send_error_text(int error) {
         case kSendErrNone:     return "";
         case kSendErrNoRadio:  return "radio not connected";
         case kSendErrNoAnswer: return "no answer";
+        case kSendErrQueued:   return "waiting for them to come online";
         // Meshtastic Routing.Error
         case 1:  return "no route";
         case 2:  return "refused";
@@ -125,6 +126,8 @@ bool Messenger::load() {
             m.snr = static_cast<float>(j["snr"].as_double());
             m.auto_response = j.get_bool("auto");
             parse_node(j.get_string("from"), m.from_node);
+            m.tries = static_cast<uint8_t>(std::clamp<int64_t>(j.get_int("tries"), 0, 255));
+            m.via_outbox = j.get_bool("outbox");
             const std::string st = j.get_string("state");
             if (!m.from_me) {
                 set_state(m, SendState::Delivered);
@@ -193,6 +196,8 @@ bool Messenger::save() {
                 o += std::string(", \"state\": \"") + state_word(m.state) + "\"";
                 if (m.error != kSendErrNone) o += ", \"err\": " + std::to_string(m.error);
             }
+            if (m.from_me && m.tries > 0) o += ", \"tries\": " + std::to_string(m.tries);
+            if (m.from_me && m.via_outbox) o += ", \"outbox\": true";
             if (m.from_node != 0) {
                 char from[32];
                 std::snprintf(from, sizeof(from), ", \"from\": \"!%08x\"", static_cast<unsigned>(m.from_node));
@@ -305,8 +310,12 @@ bool Messenger::send(uint32_t node_id, const std::string& text) {
     m.timestamp = now_s();
     const Contact* c = contact(node_id);
     if (demo_ && is_demo_node(node_id)) {
-        // Offline nodes never ack; everyone else acks at once.
-        set_state(m, !c || c->presence != Presence::Offline ? SendState::Delivered : SendState::Sending);
+        // Offline nodes are queued (never delivered); everyone else acks at once.
+        if (c && c->presence == Presence::Offline) {
+            set_state(m, SendState::Unsent, kSendErrQueued);
+        } else {
+            set_state(m, SendState::Delivered);
+        }
         if (c) {
             m.hops = c->hops;
             m.snr = c->snr;
@@ -316,6 +325,9 @@ bool Messenger::send(uint32_t node_id, const std::string& text) {
             p.node_id = node_id;
             pending_.push_back(p);
         }
+    } else if (c && c->presence == Presence::Offline) {
+        // Not heard for a long time: hold it in the outbox until it is.
+        set_state(m, SendState::Unsent, kSendErrQueued);
     } else {
         transmit(node_id, m);
     }
@@ -335,12 +347,156 @@ int Messenger::retry_index(uint32_t node_id) const {
     return -1;
 }
 
+void Messenger::resend(uint32_t node_id, Message& m) {
+    if (demo_ && is_demo_node(node_id)) {
+        // Simulated, like send(): nothing goes on the air for a demo node.
+        const Contact* c = contact(node_id);
+        if (c && c->presence == Presence::Offline) {
+            set_state(m, SendState::Unsent, kSendErrQueued);
+        } else {
+            set_state(m, SendState::Delivered);
+            if (c) {
+                m.hops = c->hops;
+                m.snr = c->snr;
+            }
+        }
+        return;
+    }
+    transmit(node_id, m);
+}
+
 bool Messenger::retry(uint32_t node_id) {
-    const int i = retry_index(node_id);
-    if (i < 0) return false;
-    transmit(node_id, chats_[node_id].messages[i]);
+    return retry_message(node_id, retry_index(node_id));
+}
+
+bool Messenger::retry_message(uint32_t node_id, int index) {
+    const auto it = chats_.find(node_id);
+    if (it == chats_.end() || index < 0 || index >= static_cast<int>(it->second.messages.size())) return false;
+    Message& m = it->second.messages[index];
+    if (!m.retryable()) return false;
+    // By hand: the outbox gets its whole budget back for this one.
+    m.tries = 0;
+    m.via_outbox = false;
+    m.backoff = false;
+    resend(node_id, m);
     touch_chats();
     bump();
+    return true;
+}
+
+bool Messenger::delete_message(uint32_t node_id, int index) {
+    const auto it = chats_.find(node_id);
+    if (it == chats_.end() || index < 0 || index >= static_cast<int>(it->second.messages.size())) return false;
+    auto& msgs = it->second.messages;
+    const Message& m = msgs[index];
+    if (m.from_me && m.packet_id != 0) {
+        const uint32_t id = m.packet_id;
+        inflight_.erase(std::remove_if(inflight_.begin(), inflight_.end(),
+                                       [id](const InFlight& f) { return f.packet_id == id; }),
+                        inflight_.end());
+    }
+    if (!m.from_me) {
+        // Was it one of the unread ones (the newest `unread` incoming)?
+        int newer = 0;
+        for (size_t i = static_cast<size_t>(index) + 1; i < msgs.size(); ++i) newer += msgs[i].from_me ? 0 : 1;
+        if (newer < it->second.unread) --it->second.unread;
+    }
+    msgs.erase(msgs.begin() + index);
+    touch_chats();
+    bump();
+    return true;
+}
+
+// ── Outbox ──────────────────────────────────────────────────────────────────
+
+bool Messenger::auto_send_pending(uint32_t node_id, const Message& m) const {
+    if (!m.retryable() || is_channel(node_id)) return false;
+    if (m.tries >= kOutboxMaxTries) return false;
+    const uint32_t t = now_s();
+    return !(m.timestamp != 0 && t > m.timestamp && t - m.timestamp > kOutboxMaxAgeS);
+}
+
+uint32_t Messenger::auto_send_wait_ms(const Message& m) const {
+    if (!m.backoff) return 0;
+    const int32_t left = static_cast<int32_t>(m.retry_after_ms - now_ms_);
+    return left > 0 ? static_cast<uint32_t>(left) : 0;
+}
+
+int Messenger::outbox_count() const {
+    int n = 0;
+    for (const auto& kv : chats_) {
+        for (const Message& m : kv.second.messages) {
+            if (m.retryable() || (m.from_me && m.state == SendState::Sending)) ++n;
+        }
+    }
+    return n;
+}
+
+void Messenger::wake_outbox(uint32_t node_id) {
+    const auto it = chats_.find(node_id);
+    if (it == chats_.end()) return;
+    for (Message& m : it->second.messages) {
+        if (m.retryable()) m.backoff = false;
+    }
+}
+
+void Messenger::run_outbox(uint32_t now_ms) {
+    if (!sender_ || demo_) return;   // no radio (demo, --shots): nothing goes out on its own
+    if (auto_sent_ && now_ms - last_auto_ms_ < kOutboxGapMs) return;
+
+    // The oldest queued message to an online contact with nothing in flight.
+    uint32_t best_node = 0;
+    Message* best = nullptr;
+    for (auto& kv : chats_) {
+        const uint32_t node = kv.first;
+        const Contact* c = contact(node);
+        if (!c || !c->online() || kv.second.demo) continue;
+        bool busy = false;
+        for (const Message& m : kv.second.messages) {
+            if (m.from_me && m.state == SendState::Sending) busy = true;
+        }
+        if (busy) continue;
+        for (Message& m : kv.second.messages) {
+            if (!auto_send_pending(node, m)) continue;
+            if (m.backoff && static_cast<int32_t>(now_ms - m.retry_after_ms) < 0) continue;
+            if (!best || m.timestamp < best->timestamp) {
+                best = &m;
+                best_node = node;
+            }
+            break;   // in order within one chat
+        }
+    }
+    if (!best) return;
+
+    transmit(best_node, *best);
+    if (best->state == SendState::Unsent) {
+        // The link refused it (not ready): no try spent, look again later.
+        best->backoff = true;
+        best->retry_after_ms = now_ms + kOutboxGapMs;
+    } else {
+        ++best->tries;
+        best->via_outbox = true;
+        best->backoff = false;
+        last_auto_ms_ = now_ms;
+        auto_sent_ = true;
+    }
+    touch_chats();
+    bump();
+}
+
+void Messenger::notify(MailNotice::Kind kind, uint32_t node_id, const std::string& text) {
+    MailNotice n;
+    n.kind = kind;
+    n.node_id = node_id;
+    n.text = text;
+    if (notices_.size() >= kMaxNotices) notices_.erase(notices_.begin());
+    notices_.push_back(std::move(n));
+}
+
+bool Messenger::pop_mail_notice(MailNotice& out) {
+    if (notices_.empty()) return false;
+    out = std::move(notices_.front());
+    notices_.erase(notices_.begin());
     return true;
 }
 
@@ -366,6 +522,13 @@ void Messenger::delete_chat(uint32_t node_id) {
 }
 
 void Messenger::tick(uint32_t now_ms) {
+    now_ms_ = now_ms;
+    if (!ticked_ || now_ms - outbox_check_ms_ >= 1000) {
+        ticked_ = true;
+        outbox_check_ms_ = now_ms;
+        run_outbox(now_ms);
+    }
+
     // Debounced save: at most one write per kSaveMs.
     if (!chats_dirty_) {
         save_armed_ = false;
@@ -465,6 +628,7 @@ void Messenger::clear() {
     chats_.clear();
     pending_.clear();
     inflight_.clear();
+    notices_.clear();
     demo_nodes_.clear();
     touch_chats();
     bump();
@@ -480,12 +644,15 @@ void Messenger::upsert_contact(const Contact& c) {
     if (is_channel(c.node_id)) return;   // the channel is not a contact
     for (Contact& have : contacts_) {
         if (have.node_id == c.node_id) {
+            const bool back = !have.online() && c.online();
             have = c;
+            if (back) wake_outbox(c.node_id);   // heard again: queued mail may go now
             bump();
             return;
         }
     }
     contacts_.push_back(c);
+    if (c.online()) wake_outbox(c.node_id);
     bump();
 }
 
@@ -499,6 +666,8 @@ void Messenger::receive(uint32_t node_id, const std::string& text, int hops, flo
     m.auto_response = auto_response;
     set_state(m, SendState::Delivered);
     add_message(node_id, m, true);
+    wake_outbox(node_id);   // it is talking to us: it can hear us too
+    notify(MailNotice::Kind::NewMail, node_id, text);
 }
 
 void Messenger::receive_channel(uint32_t from_node, const std::string& text, int hops, float snr) {
@@ -536,8 +705,16 @@ bool Messenger::ack_packet(uint32_t packet_id, bool ok, int error) {
             m->snr = c->snr;
         }
         set_state(*m, SendState::Delivered);
+        if (m->via_outbox) notify(MailNotice::Kind::Delivered, node, m->text);
     } else {
         set_state(*m, SendState::Failed, error != kSendErrNone ? error : kSendErrNoAnswer);
+        if (m->via_outbox) {
+            // Back off before the outbox tries again: 30 s, 1 min, 2 min, ...
+            const int shift = std::min(m->tries > 0 ? m->tries - 1 : 0, 10);
+            const uint32_t wait = std::min(kOutboxBackoffMs << shift, kOutboxBackoffMaxMs);
+            m->backoff = true;
+            m->retry_after_ms = now_ms_ + wait;
+        }
     }
     touch_chats();
     bump();

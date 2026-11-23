@@ -67,6 +67,7 @@ struct Skin {
     uint32_t accent;               // logo block
 
     bool dark;                     // dark face: status colours stay bright
+    uint8_t orbs = 0;              // title-bar buttons: 0 close box, 1 Aqua red/amber/green orbs, 2 Graphite orbs
 };
 
 int skin_count();

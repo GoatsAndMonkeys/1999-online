@@ -21,6 +21,16 @@ std::unique_ptr<Screen> make_screen(ScreenId id, Ctx& ctx) {
         case ScreenId::Skins:     return make_skins_screen(ctx);
         case ScreenId::Monster:   return make_monster_screen(ctx);
         case ScreenId::Radio:     return make_radio_screen(ctx);
+        case ScreenId::Mailbox:   return make_mailbox_screen(ctx);
+        case ScreenId::Map:       return make_map_screen(ctx);
+        case ScreenId::Hood:      return make_hood_screen(ctx);
+        case ScreenId::Ringtones: return make_ring_screen(ctx);
+        case ScreenId::Snake:     return make_snake_screen(ctx);
+        case ScreenId::Calc:      return make_calc_screen(ctx);
+        case ScreenId::Mines:     return make_mines_screen(ctx);
+        case ScreenId::Puzzle:    return make_puzzle_screen(ctx);
+        case ScreenId::Savers:    return make_savers_screen(ctx);
+        case ScreenId::Beats:     return make_beats_screen(ctx);
         default:                  return nullptr;
     }
 }
@@ -41,6 +51,16 @@ const char* screen_slug(ScreenId id) {
         case ScreenId::Skins:     return "skins";
         case ScreenId::Monster:   return "monstermesh";
         case ScreenId::Radio:     return "radio";
+        case ScreenId::Mailbox:   return "mailbox";
+        case ScreenId::Map:       return "map";
+        case ScreenId::Hood:      return "neighborhood";
+        case ScreenId::Ringtones: return "ringtones";
+        case ScreenId::Snake:     return "snake";
+        case ScreenId::Calc:      return "calc";
+        case ScreenId::Mines:     return "mines";
+        case ScreenId::Puzzle:    return "puzzle";
+        case ScreenId::Savers:    return "screensavers";
+        case ScreenId::Beats:     return "beats";
         default:                  return "unknown";
     }
 }

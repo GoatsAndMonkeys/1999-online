@@ -3,9 +3,11 @@
 #include "game_state.h"
 #include "mesh_backend.h"
 #include "mesh_space.h"
+#include "mail_chime.h"
 #include "messenger.h"
 #include "style.h"
 #include "settings.h"
+#include "screensaver.h"
 #include "skin.h"
 #include "softkeys.h"
 #include "widgets.h"
@@ -104,8 +106,29 @@ void Router::build_chrome() {
                       s.title_fill == TitleFill::GradH);
         }
     }
-    // Close box.
-    {
+    // Close box, or three glossy orbs (Aqua-era Mac skins).
+    if (s.orbs) {
+        struct Orb { uint32_t light, base, rim; };
+        static const Orb kAqua[3] = {{0xffb4aa, 0xe0443a, 0x9a2a22},
+                                     {0xffe6a0, 0xe8a020, 0x9a6a10},
+                                     {0xc4f2aa, 0x44b032, 0x2a7a20}};
+        static const Orb kGraphite = {0xe4e9f0, 0x8e9aae, 0x5a6476};
+        for (int i = 0; i < 3; ++i) {
+            const Orb& o = s.orbs == 2 ? kGraphite : kAqua[i];
+            lv_obj_t* b = box(wtab_, 4 + i * 14, 2, 11, 11);
+            lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(b, c(o.light), 0);
+            lv_obj_set_style_bg_grad_color(b, c(o.base), 0);
+            lv_obj_set_style_bg_grad_dir(b, LV_GRAD_DIR_VER, 0);
+            lv_obj_set_style_border_width(b, 1, 0);
+            lv_obj_set_style_border_color(b, c(o.rim), 0);
+            lv_obj_t* glint = box(b, 2, 1, 5, 3);   // highlight on the top of the bead
+            lv_obj_set_style_radius(glint, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(glint, c(0xffffff), 0);
+            lv_obj_set_style_bg_opa(glint, LV_OPA_70, 0);
+        }
+    } else {
         const int cx = s.close_left ? 3 : (s.title_tab ? 0 : tw - 14);
         lv_obj_t* cb = win::frame(wtab_, s.close_left ? 3 : cx, 2, 11, 11, win::Edge::Raised, s.close_bg,
                                   s.close_radius);
@@ -522,6 +545,9 @@ uint32_t Router::nav_raw(uint32_t raw) const {
 }
 
 bool Router::handle_raw_key(uint32_t raw, bool long_pressed) {
+    // Any key wakes the screen saver and is swallowed; every key resets the idle clock.
+    if (saver_active()) { saver_stop(); return true; }
+    saver_note_activity(lv_tick_get());
     if (long_pressed) {
         if (exit_armed_ && (raw == LV_KEY_ESC) && stack_.size() <= 1 && !modal_) {
             LOG_INFO("exit requested");
@@ -572,6 +598,20 @@ void Router::tick() {
         // The messenger runs on every screen so replies and the unread note
         // keep arriving while you are in the game or the player.
         mm::messenger().tick(now);
+        // Mail notices: the Mailbox shows its own; an open chat with that
+        // buddy already shows the message. Everywhere else, toast and chime.
+        if (top_id() != ScreenId::Mailbox) {
+            mm::MailNotice n;
+            while (mm::messenger().pop_mail_notice(n)) {
+                if (top_id() == ScreenId::Im && ctx_.peer == n.node_id) continue;
+                const std::string who = mm::messenger().name_of(n.node_id);
+                if (n.kind == mm::MailNotice::Kind::Delivered)
+                    toast(std::string(LV_SYMBOL_ENVELOPE "  Delivered to ") + who, 2500, color::kGood);
+                else
+                    toast(std::string(LV_SYMBOL_ENVELOPE "  You've got mail!\n") + who + ": " + n.text, 3500, color::kInfo);
+                mm::play_mail_chime();
+            }
+        }
         mm::settings().tick(now);   // debounced write of changed settings
         mm::mesh_space().tick(now); // same for my Mesh Space page
         if (mm::messenger().revision() != last_msg_rev_) {
@@ -620,6 +660,8 @@ void Router::tick() {
     }
 
     if (Screen* s = top()) s->tick(now);
+    // Idle screen saver. Not over the music visualiser or a battle.
+    if (top_id() != ScreenId::Amp && top_id() != ScreenId::Battle) saver_tick(now);
     // State can change without a key (a challenge arrives, a room hatches):
     // keep the soft keys in step. Redraws only when they differ.
     if (!modal_) update_softkeys();
